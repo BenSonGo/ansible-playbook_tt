@@ -1,0 +1,138 @@
+---
+- name: configure storage group
+  hosts: storage_servers
+  become: yes
+  tasks:
+    - name: installing tuned and nfs-common
+      package:
+        name:
+          - tuned
+          - nfs-common
+        state: present
+
+    - name: creating tuned conf
+      copy:
+        dest: /etc/tuned/data-storage-nfs/tuned.conf
+        content: |
+          [main]
+          summary=Tuned Profile for Data Storage with NFS
+
+          [cpu]
+          governor=performance
+          energy_perf_bias=performance
+          min_perf_pct=100
+          force_latency=1
+
+          [vm]
+          transparent_hugepages=never
+
+          [disk]
+          readahead=8192
+          elevator=kyber
+
+          [sysctl]
+          kernel.sem = 256 32000 100 142
+          kernel.shmmni = 4096
+          kernel.msgmni = 2878
+          fs.file-max = 6553600
+          kernel.sched_min_granularity_ns = 500000
+          kernel.sched_wakeup_granularity_ns = 1000000
+          fs.aio-max-nr=1048576
+          kernel.pid_max=4194304
+
+    - name: enabling tuned profile
+      command: tuned-adm profile data-storage-nfs
+
+- name: configure gpu group
+  hosts: gpu_servers
+  become: yes
+  vars:
+    nfs_servers:
+      10.0.1.0/24:
+        - 10.0.1.240
+        - 10.0.1.241
+        - 10.0.1.242
+      10.0.2.0/24:
+        - 10.0.2.240
+        - 10.0.2.241
+        - 10.0.2.242
+      10.0.3.0/24:
+        - 10.0.3.240
+        - 10.0.3.241
+        - 10.0.3.242
+  tasks:
+    - name: installing prerequisites for docker
+      package:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: adding gpg key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: adding docker actual repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: update apt
+      apt:
+        update_cache: yes
+
+    - name: installing kvm, sriov, docker, nfs-common
+        name:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+          - bridge-utils
+          - virtinst
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - sriov-network-device-plugin
+          - nfs-common
+        state: present
+
+    - name: add current user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: update grub conf
+      lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="crashkernel=auto intel_iommu=on iommu=pt"'
+        backrefs: yes
+
+    - name: updating GRUB
+      command: grub2-mkconfig -o /boot/grub2/grub.cfg
+
+    - name: set storage server ips based on network segment
+      set_fact:
+        storage_ips: "{{ nfs_servers[ansible_default_ipv4.network | ipaddr('network')] }}"
+
+    - name: permanent mounting /UserData
+      lineinfile:
+        path: /etc/fstab
+        line: "{{ item }}:/UserData /UserData nfs defaults 0 0"
+      loop: "{{ storage_ips }}"
+
+    - name: permanent mounting /Images
+      lineinfile:
+        path: /etc/fstab
+        line: "{{ item }}:/Images /Images nfs defaults 0 0"
+      loop: "{{ storage_ips }}"
+
+    - command: mount -a
